@@ -1,66 +1,49 @@
 package com.example.geofencingtest
 
 import android.Manifest
-import android.app.PendingIntent
-import android.content.BroadcastReceiver
-import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
-import android.location.LocationManager
+import android.location.Location
 import android.os.Build
+import android.os.Build.VERSION_CODES.TIRAMISU
 import android.os.Bundle
 import android.util.Log
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import androidx.localbroadcastmanager.content.LocalBroadcastManager
-import com.google.android.gms.location.Geofence
-import com.google.android.gms.location.GeofencingClient
-import com.google.android.gms.location.GeofencingRequest
+import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationCallback
+import com.google.android.gms.location.LocationRequest
+import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
+import java.util.Calendar
+import kotlin.math.acos
+import kotlin.math.cos
+import kotlin.math.sin
 
 
 class MainActivity : AppCompatActivity() {
 
     private val CHANNEL = "gym_streak.flutter.geofence"
-    private var latitude: Double? = 18.5937675
-    private var longitude: Double? = 73.7587252
+    private var latitude: Double = 18.5937675
+    private var longitude: Double = 73.7587252
     private var radius: Int? = 500
     private var loitering: Int? = 10000
     private var id: String? = ""
-    lateinit var geofencingClient: GeofencingClient
     val LOCATION_REQUEST_CODE = 1000
+    var enterTime: Long? = null
+    var exitTime: Long? = null
 
-    var pendingIntent: PendingIntent? = null
+    private var fusedLocationClient: FusedLocationProviderClient? = null
 
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
-        var geofenceBroadcastReceiver = GeofenceBroadcastReceiver()
-        applicationContext.registerReceiver(geofenceBroadcastReceiver, IntentFilter().also {
-            it.addAction("test")
-        }, RECEIVER_EXPORTED)
         registerLocationForGeofence()
-
-        val receiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context?, intent: Intent?) {
-
-                val geofenceTransition = intent?.getIntExtra("geofenceTransition", 0)
-
-                // Communicate with Flutter via MethodChannel
-                Toast.makeText(
-                    applicationContext,
-                    "geofenceTransition $geofenceTransition",
-                    Toast.LENGTH_LONG
-                ).show()
-            }
-        }
-        LocalBroadcastManager.getInstance(this)
-            .registerReceiver(receiver, IntentFilter("geofence_event"))
-
+        val intent = Intent(this, GeofenceService::class.java) // Build the intent for the service
+        this.startForegroundService(intent)
     }
 
     private fun registerLocationForGeofence() {
@@ -79,6 +62,20 @@ class MainActivity : AppCompatActivity() {
             Manifest.permission.ACCESS_BACKGROUND_LOCATION
         ) == PackageManager.PERMISSION_GRANTED
 
+        if (Build.VERSION.SDK_INT >= TIRAMISU) {
+            val postNotification = ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+
+            if (!postNotification) {
+                ActivityCompat.requestPermissions(
+                    this,
+                    arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                    LOCATION_REQUEST_CODE
+                )
+            }
+        }
 
         if (!fineLocationPermissionGranted || !coarseLocationPermissionGranted || (!accessBackgroundLocation && Build.VERSION.SDK_INT >= 29)) {
             // Request both fine and coarse location permissions
@@ -96,7 +93,7 @@ class MainActivity : AppCompatActivity() {
             )
 
         } else {
-            startGeofencing(id, latitude, longitude, radius, loitering)
+            requestLocationUpdates(latitude, longitude)
         }
     }
 
@@ -112,7 +109,7 @@ class MainActivity : AppCompatActivity() {
                 grantResults[0] == PackageManager.PERMISSION_GRANTED &&
                 grantResults[1] == PackageManager.PERMISSION_GRANTED && (grantResults.size == 3 && grantResults[2] == PackageManager.PERMISSION_GRANTED)
             ) {
-                startGeofencing(id, latitude, longitude, radius, loitering)
+                requestLocationUpdates(latitude, longitude)
             } else {
                 Toast.makeText(
                     applicationContext,
@@ -123,85 +120,72 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun startGeofencing(
-        id: String?,
-        latitude: Double?,
-        longitude: Double?,
-        radius: Int?,
-        loitering: Int?
-    ) {
-        geofencingClient = LocationServices.getGeofencingClient(this)
-        if (latitude != null && longitude != null && radius != null && loitering != null) {
-            val gymGeofence = Geofence.Builder()
-                // Set the request ID of the geofence. This is a string to identify this
-                // geofence.
-                .setRequestId("gym_geofence")
-                // Set the circular region of this geofence.
-                .setCircularRegion(
-                    latitude,
-                    longitude,
-                    radius.toFloat()
-                )
-                // Set the transition types of interest. Alerts are only generated for these
-                // transition. We track entry and exit transitions in this sample.
-                .setTransitionTypes(Geofence.GEOFENCE_TRANSITION_DWELL or Geofence.GEOFENCE_TRANSITION_ENTER or GeofencingRequest.INITIAL_TRIGGER_EXIT)
-                .setLoiteringDelay(loitering)
-                .setExpirationDuration(Geofence.NEVER_EXPIRE)
-                // Create the geofence.
-                .build()
 
-            Log.d("MainActivity", gymGeofence.toString())
+    private fun requestLocationUpdates(lat: Double, lon: Double) {
+        val locationRequest: LocationRequest = LocationRequest.Builder(LocationRequest.PRIORITY_HIGH_ACCURACY, 10000).build()
+        if (ActivityCompat.checkSelfPermission(
+                this,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) != PackageManager.PERMISSION_GRANTED && ActivityCompat.checkSelfPermission(
+                this,
+                Manifest.permission.ACCESS_COARSE_LOCATION
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
+        fusedLocationClient?.requestLocationUpdates(locationRequest,
+            object : LocationCallback() {
+                override fun onLocationResult(locationResult: LocationResult) {
+                    super.onLocationResult(locationResult)
+                    val location: Location? = locationResult.lastLocation
+                    if (location != null) {
+                        val distance: Double = calculateDistance(
+                            location.getLatitude(), location.getLongitude(),
+                            lat, lon
+                        ) // Replace with your target lat/long
+                        Toast.makeText(applicationContext, "Lat lon $location", Toast.LENGTH_SHORT).show()
 
-            if (ActivityCompat.checkSelfPermission(
-                    this,
-                    Manifest.permission.ACCESS_FINE_LOCATION
-                ) != PackageManager.PERMISSION_GRANTED
-            ) {
-                // TODO: Consider calling
-                //    ActivityCompat#requestPermissions
-                // here to request the missing permissions, and then overriding
-                //   public void onRequestPermissionsResult(int requestCode, String[] permissions,
-                //                                          int[] grantResults)
-                // to handle the case where the user grants the permission. See the documentation
-                // for ActivityCompat#requestPermissions for more details.
-                return
-            }
-            getGeofencePendingIntent()?.let {
-                geofencingClient.addGeofences(
-                    getGeofencingRequest(gymGeofence),
-                    it
-                ).run {
-                    addOnSuccessListener {
-                        Log.d("MainActivity: Geofence", "Geofence added successfully")
-                    }
-                    addOnFailureListener {
-                        Log.d("MainActivity: Geofence", it.message.toString())
+                        if (distance < (radius!!/1000.0)) {
+                            Log.d("MainActivity: distance", distance.toString())
+                            if (enterTime == null) {
+                                enterTime = Calendar.getInstance().time.time
+                                Log.d("MainActivity: enter time set", enterTime.toString())
+                                Toast.makeText(applicationContext, "Dwelling started", Toast.LENGTH_SHORT).show()
+                            }
+                          Toast.makeText(applicationContext, "In Geofence Area", Toast.LENGTH_SHORT).show()
+                        } else {
+                            if (enterTime != null) {
+                                exitTime = Calendar.getInstance().time.time
+                                if (exitTime!!.minus(enterTime!!) < loitering!!) {
+                                    Log.d("Streak not achieved: ", exitTime!!.minus(enterTime!!).toString())
+                                    Toast.makeText(applicationContext, "Streak not achieved", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    Log.d("Streak achieved: ", exitTime!!.minus(enterTime!!).toString())
+                                    Toast.makeText(applicationContext, "Streak achieved", Toast.LENGTH_SHORT).show()
+                                    enterTime = null
+                                    exitTime = null
+                                }
+                            }
+                        }
+                        Log.d("Distance", "Distance: $distance")
+                        // Do something with the distance
                     }
                 }
-            }
-        }
-    }
-
-    private fun getGeofencingRequest(geofence: Geofence): GeofencingRequest {
-        return GeofencingRequest.Builder().apply {
-            setInitialTrigger(GeofencingRequest.INITIAL_TRIGGER_DWELL or GeofencingRequest.INITIAL_TRIGGER_ENTER)
-            addGeofence(geofence)
-        }.build()
-    }
-
-    private fun getGeofencePendingIntent(): PendingIntent? {
-        val intent = Intent(this, GeofenceBroadcastReceiver::class.java)
-        // We use FLAG_UPDATE_CURRENT so that we get the same pending intent back when calling
-        // addGeofences() and removeGeofences().
-        if (pendingIntent != null) {
-            return pendingIntent
-        }
-        pendingIntent = PendingIntent.getBroadcast(
-            this,
-            1,
-            intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            }, null
         )
-        return pendingIntent
+    }
+
+    private fun calculateDistance(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+        val theta = lon1 - lon2
+        var dist = sin(Math.toRadians(lat1)) * sin(Math.toRadians(lat2)) + cos(
+            Math.toRadians(lat1)
+        ) * cos(
+            Math.toRadians(lat2)
+        ) * cos(Math.toRadians(theta))
+        dist = acos(dist)
+        dist = Math.toDegrees(dist)
+        dist *= 60 * 1.1515
+        return dist * 1.60934
     }
 }

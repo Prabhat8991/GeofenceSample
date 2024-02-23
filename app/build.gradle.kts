@@ -36,6 +36,10 @@ android {
 }
 
 dependencies {
+    val core_version = "1.12.0"
+
+    // Java language implementation
+    implementation("androidx.core:core:$core_version")
 
     implementation("androidx.core:core-ktx:1.9.0")
     implementation("androidx.appcompat:appcompat:1.6.1")
